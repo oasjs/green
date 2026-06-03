@@ -1,13 +1,10 @@
-# https://www.geeksforgeeks.org/python/filter-color-with-opencv/
-
 import cv2
 import numpy as np
 
-# cap = cv2.VideoCapture(0)  # Start webcam
-img = 
+cap = cv2.VideoCapture(0)  # Start webcam
 
 while True:
-    # _, frame = cap.read()
+    _, frame = cap.read()
     
     # Convert BGR to HSV
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
