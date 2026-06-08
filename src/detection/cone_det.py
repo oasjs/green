@@ -16,16 +16,27 @@
 # Secondary Refereces:
 # https://revisitingmiwb.github.io/ for understanding white balancing;
 
+from __future__ import annotations
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import colors
 from mpl_toolkits.mplot3d import Axes3D
-from __future__ import annotations
+
+# Yellow
+YELLOW_LOW  = np.array([ 18, 120, 80])
+YELLOW_HIGH = np.array([ 35, 255, 255])
+
+# Blue
+BLUE_LOW    = np.array([ 95, 120, 50])
+BLUE_HIGH   = np.array([135, 255, 255])
+
+# Orange
+ORANGE_LOW  = np.array([  5, 150, 80])
+ORANGE_HIGH = np.array([ 18, 255, 255])
 
 PATH_TO_IMAGES = '../../assets/images/'
 
-# TODO: modify the following function to deal with both yellow and blue cones
 # The HSV filters/masks must account for both colors present in the target cone:
 # YELLOW: yellow and black; BLUE: blue and white
 def apply_color_mask(img, hsv, color):
@@ -34,27 +45,25 @@ def apply_color_mask(img, hsv, color):
     # Caution with this section
     # The conditions are not ideal -> shall be changed
     if color == 0:
-        lower_blue = np.array([60, 35, 140])
-        upper_blue = np.array([180, 255, 255])
-        lower_white = np.array([])
-        upper_white = np.array([])
+        lower = BLUE_LOW
+        upper = BLUE_HIGH
     elif color == 1:
-        # TODO: fill the arrays
-        lower_yellow = np.array([])
-        uper_yellow = np.array([])
-        lower_black = np.array([])
-        upper_black = np.array([])
+        lower = YELLOW_LOW
+        upper = YELLOW_HIGH
+    elif color == 2:
+        lower = ORANGE_LOW
+        upper = ORANGE_HIGH
 
     # Create mask
-    mask = cv2.inRange(hsv, lower_blue, upper_blue)
+    mask = cv2.inRange(hsv, lower, upper)
 
     # Filter the blue region
     result = cv2.bitwise_and(img, img, mask=mask)
 
     # Show imgs
     cv2.imshow('Original img', img)
-    cv2.imshow('Blue Mask', mask)
-    cv2.imshow('Blue Filtered Result', result)
+    cv2.imshow('Mask', mask)
+    cv2.imshow('Filtered Result', result)
     
     cv2.waitKey(0)
     cv2.destroyAllWindows()
@@ -68,10 +77,12 @@ def percentile_stretch(img_bgr, percentile=95):
             img[:,:,i] = img[:,:,i] * (255.0 / p)
     return np.clip(img, 0, 255).astype(np.uint8)
 
-# For reducing noise
+# For reducing noise - undesired bits extracted from applying the mask
 def apply_morphological_cleaning(img):
-    cv2.erode(img)
-    cv2.dilate(img)
+    # img var must be in RGB to be converted as shown below
+    img_bw = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    cv2.erode(img_bw)
+    cv2.dilate(img_bw)
     
 # # For recognizing the cone geometry
 # # TODO: Develop the algorithm and apply the contour filters using cv2 -> a source was not searched yet.
@@ -81,9 +92,9 @@ def apply_morphological_cleaning(img):
 # https://www.geeksforgeeks.org/python/clahe-histogram-eqalization-opencv/
 # For adjusting only brightness in the context of using HSV
 # Observe that only the Value V receives CLAHE processing
-def apply_clahe_contrast(hsv):
+def apply_clahe_contrast(hsv, clipLimit=2.0, tileGridSize=(8,8)):
     # image_bw = cv2.cvtColor(hsv, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit, tileGridSize)
     hsv[:, :, 2] = np.clip(clahe.apply(hsv[:, :, 2]) + 30, 0, 255).astype(np.uint8)
     # _, threshold_img = cv2.threshold(hsv, 155, 255, cv2.THRESH_BINARY)
     # display_image("Ordinary Threshold", threshold_img)
@@ -122,27 +133,29 @@ def plot(img_rgb, hsv):
 
     plt.show()
 
-# def preprocess(frame) -> cv2.typing.MatLike:
-#     # White Balance WB
-#     img = percentile_stretch(img)
-#     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-#     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-#     hsv = apply_clahe_contrast(img)
-#     return hsv
+# Apply white balancing, HSV conversion and clahe contrast as preprocessing steps
+def preprocess(img) -> cv2.typing.MatLike:
+    # White Balance WB
+    img = percentile_stretch(img)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hsv = apply_clahe_contrast(img)
+    return hsv
 
 def main():
     # Read the entirety of the image passed through its path
-    img = cv2.imread(PATH_TO_IMAGES)
+    # TODO: generalize the image path to make the modifictions easier
+    img = cv2.imread(PATH_TO_IMAGES + '000004.png')
 
     # Shows the original image
     cv2.imshow("ORIGINAL IMAGE:", img)
 
     # Print width, length and channels (the latter for each pixel)
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    print(img_rgb.shape)
+    print(img_rgb)
 
     # Convert BGR to HSV
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    # hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hsv = preprocess(img)
 
     # Prints a complete plot for viewing relevant information
     plot(img_rgb, hsv)
@@ -153,6 +166,7 @@ def main():
     for color in colors:
         # Calls function to apply mask color according to the color
         apply_color_mask(img, hsv, color)
+    
 
     print("Exiting...")  # Confirm exit
 
