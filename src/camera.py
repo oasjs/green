@@ -160,7 +160,7 @@ class StereoCameraRecorded:
 if __name__ == "__main__":
     pipeline = dai.Pipeline()
 
-    image_width, image_heigth = 1280, 800
+    image_width, image_heigth = 640, 400
     fps = 30
     camera = StereoCameraLive(pipeline, image_width, image_heigth, fps)
     camera.stereo.setRectification(True)
@@ -172,39 +172,12 @@ if __name__ == "__main__":
     colorMap = cv2.applyColorMap(np.arange(256, dtype=np.uint8), cv2.COLORMAP_JET)
     colorMap[0] = [0, 0, 0]  # to make zero-disparity pixels black
 
-    # Basic device info
-    print("DeviceID:", camera.device.getDeviceInfo().getDeviceId())
-    print("USB speed:", camera.device.getUsbSpeed())
-    print("Connected cameras:", camera.device.getConnectedCameras())
-    print("Camera sensor names:", camera.device.getCameraSensorNames())
-
-    # Calibration / intrinsics
-    calibData = camera.device.readCalibration()
-    print(f"Baseline: {calibData.getBaselineDistance()}")
-
-    for socket, name in camera.device.getCameraSensorNames().items():
-        print(f"\n--- {name} ({socket}) ---")
-        try:
-            intrinsics = calibData.getCameraIntrinsics(socket)
-            print("  Intrinsics:", intrinsics)
-            print("  Focal length (fx):", intrinsics[0][0])
-            distortion = calibData.getDistortionCoefficients(socket)
-            print("  Distortion:", distortion)
-        except Exception as e:
-            print("  No calibration data:", e)
-
     with pipeline:
         pipeline.start()
         maxDisparity = 1
         while pipeline.isRunning():
             disparity = cast(dai.ImgFrame, disparityQueue.get())
-
-            intrinsics = disparity.getTransformation().getSourceIntrinsicMatrix()
-            print("Focal length in pixels:", intrinsics[0][0])
-
-            assert isinstance(disparity, dai.ImgFrame)
             npDisparity = disparity.getFrame()
-            print(npDisparity)
             maxDisparity = max(maxDisparity, np.max(npDisparity))
             colorizedDisparity = cv2.applyColorMap(
                 ((npDisparity / maxDisparity) * 255).astype(np.uint8), colorMap
