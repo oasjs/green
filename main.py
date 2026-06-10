@@ -34,7 +34,7 @@ class TerminalUserInterface:
     def ask_depth_estimation_approach(self):
         print("Choose a depth estimation approach:\n")
         print("  [1] Classical approach")
-        print("  [2] Neural networks approach")
+        print("  [2] Neural networks approach\n")
         choice = self._prompt("Enter choice: ", valid={"1", "2"})
 
         if choice == "1":
@@ -49,12 +49,12 @@ class TerminalUserInterface:
         print("\nNeural Network Options\n")
         print("  [1] Raft-Stereo")
         print("  [2] CREStereo")
-        print("  [3] AANet")
-        print("  [4] FoundationStereo")
-        print("  [5] IGEV-Stereo")
-        print("  [6] IGEV++")
-        print("  [7] S2M2")
-        print("  [8] UniMatch")
+        # print("  [3] AANet")
+        # print("  [4] FoundationStereo")
+        # print("  [5] IGEV-Stereo")
+        # print("  [6] IGEV++")
+        # print("  [7] S2M2")
+        # print("  [8] UniMatch")
         print("  [9] DepthAi\n")
         choice = self._prompt(
             "Enter choice: ", valid={"1", "2", "3", "4", "5", "6", "7", "8", "9"}
@@ -102,7 +102,7 @@ class TerminalUserInterface:
 
     def depthai(self):
         print("\nDepthAi Options\n")
-        print("  [1] Embedded")
+        print("  [1] Embedded\n")
         choice = self._prompt("Enter choice: ", valid={"1"})
 
         match choice:
@@ -186,19 +186,21 @@ def main():
         exit(0)
 
     while tui.running:
-        depth_estimator = tui.ask_depth_estimation_approach()
-        if depth_estimator is None:
+        depth_estimator_approach = tui.ask_depth_estimation_approach()
+        if depth_estimator_approach is None:
             exit(0)
 
         depthai_pipeline = dai.Pipeline()
-        camera = StereoCameraLive(depthai_pipeline, 640, 400, 15)
+        camera = StereoCameraLive(depthai_pipeline, 640, 400, 30)
         camera.stereo.setRectification(True)
-        camera.stereo.setExtendedDisparity(True)
+        # camera.stereo.setExtendedDisparity(True)
         camera.stereo.setLeftRightCheck(True)
 
-        embedded_queue = camera.stereo.disparity.createOutputQueue()
-
-        # neural_pipeline = NeuralPipeline(model=depth_estimator)
+        depth_estimator = (
+            camera.stereo.disparity.createOutputQueue()
+            if depth_estimator_approach == "depthai-embedded"
+            else NeuralPipeline(model=depth_estimator_approach)
+        )
 
         deapth_visualizer = DepthMapVisualizer()
 
@@ -206,8 +208,9 @@ def main():
             depthai_pipeline.start()
 
             while depthai_pipeline.isRunning():
-                if depth_estimator == "depthai-embedded":
-                    dai_disparity = cast(dai.ImgFrame, embedded_queue.get())
+                if depth_estimator_approach == "depthai-embedded":
+                    assert isinstance(depth_estimator, dai.MessageQueue)
+                    dai_disparity = cast(dai.ImgFrame, depth_estimator.get())
                     disparity = dai_disparity.getFrame()
                 else:
                     left_image, right_image = camera.next_rectified_pair()
@@ -219,7 +222,8 @@ def main():
                         left_image = cv2.cvtColor(left_image, cv2.COLOR_GRAY2BGR)
                         right_image = cv2.cvtColor(right_image, cv2.COLOR_GRAY2BGR)
 
-                    result = neural_pipeline(left_image, right_image)
+                    assert isinstance(depth_estimator, NeuralPipeline)
+                    result = depth_estimator(left_image, right_image)
                     result = cast(StereoOutput, result)
                     disparity = result.disparity
 
