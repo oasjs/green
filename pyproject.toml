@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
     "depthai>=3.7.1",
+    "line-profiler>=5.0.2",
+    "memory-profiler>=0.61.0",
     "numpy>=2.4.6",
     "opencv-python>=4.13.0.92",
     "stereo-matching>=0.1.0",

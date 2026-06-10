@@ -1,1 +1,1 @@
-from .neural import StereoPipelineWrapper
+from .neural import NeuralPipeline

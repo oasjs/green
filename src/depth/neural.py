@@ -1,10 +1,13 @@
 from typing import Optional, Union, List
 from stereo_matching import pipeline, StereoOutput
 
+from line_profiler import profile as time_profile
+from memory_profiler import profile as memory_profile
+
 import numpy as np
 
 
-class StereoPipelineWrapper:
+class NeuralPipeline:
     def __init__(
         self, model: Optional[str] = None, device: Optional[str] = None, **kwargs
     ):
@@ -12,6 +15,8 @@ class StereoPipelineWrapper:
             "stereo-matching", model=model, device=device, kwargs=kwargs
         )
 
+    @time_profile
+    @memory_profile
     def __call__(
         self,
         left_images: Union[str, "Image.Image", np.ndarray, List],
