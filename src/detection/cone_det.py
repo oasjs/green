@@ -1,23 +1,31 @@
+# =============================================================================
+# Cone Detection Pipeline — Formula Student Classic CV
+# =============================================================================
+#
 # Main References:
 # Libs:
-# https://docs.opencv.org/3.4/ for OpenCV documentation - main library of the project
-# https://numpy.org/doc/ for NumPy documentation - main library for matrix/vectorial calculations
-# https://www.geeksforgeeks.org/computer-vision/image-processing-algorithms-in-computer-vision/ for getting the content seen during classes summarized
-# https://docs.opencv.org/3.4/dd/d53/tutorial_py_depthmap.html for understanding depth map (suits better the other part of the project);
-# https://www.geeksforgeeks.org/computer-vision/comprehensive-guide-to-edge-detection-algorithms/ for possible edge detection in geometry matching on the cone;
-# https://www.geeksforgeeks.org/computer-graphics/hsv-color-model-in-computer-graphics/ for understanding HSV color model
-# https://www.geeksforgeeks.org/python/filter-color-with-opencv/ for HSV filters/masks;
-# https://github.com/computervisionpro/yt/blob/main/hsv_masking/color-nemo.py for hints to defining th range of the HSV;
-# https://www.geeksforgeeks.org/python/clahe-histogram-eqalization-opencv/ for CLAHE in brightness equalisation;
-# https://learnopencv.com/contour-detection-using-opencv-python-c/ for contour detection;
-
-# MOD 1: Cap. 1.2.1 - morphological operations for eliminating unwanted noise and aggregating separated pieces;
-# MOD 1: Cap. 1.2.2 - for identifying the borders of the cones and, therefore their geometry;
-# MOD 1: Cap 1.3.1 - for normalizing the HSV filter;
-
-# Secondary Refereces:
-# https://revisitingmiwb.github.io/ for understanding white balancing;
-# https://github.com/PooyaNasiri/Object_Detection-OpenCV for comparing the current code to another cone detection algorithm
+#   https://docs.opencv.org/3.4/
+#   https://numpy.org/doc/
+#   https://www.geeksforgeeks.org/computer-vision/image-processing-algorithms-in-computer-vision/
+#   https://docs.opencv.org/3.4/dd/d53/tutorial_py_depthmap.html
+#   https://www.geeksforgeeks.org/computer-vision/comprehensive-guide-to-edge-detection-algorithms/
+#   https://www.geeksforgeeks.org/computer-graphics/hsv-color-model-in-computer-graphics/
+#   https://www.geeksforgeeks.org/python/filter-color-with-opencv/
+#   https://github.com/computervisionpro/yt/blob/main/hsv_masking/color-nemo.py
+#   https://www.geeksforgeeks.org/python/clahe-histogram-eqalization-opencv/
+#   https://learnopencv.com/contour-detection-using-opencv-python-c/
+#
+# MOD 1: Cap. 1.2.1 - morphological operations
+# MOD 1: Cap. 1.2.2 - cone border/geometry identification
+# MOD 1: Cap  1.3.1 - HSV filter normalisation
+#
+# Secondary References:
+#   https://revisitingmiwb.github.io/
+#   https://github.com/PooyaNasiri/Object_Detection-OpenCV
+#   VÖDISCH, N.; DODEL, D.; SCHÖTZ, M. FSOCO: The Formula Student Objects in
+#   Context Dataset. SAE International Journal of Connected and Automated
+#   Vehicles, v. 5, n. 1, 2022. DOI: 10.4271/12-05-01-0003.
+# =============================================================================
 
 from __future__ import annotations
 import cv2
@@ -26,221 +34,411 @@ import matplotlib.pyplot as plt
 from matplotlib import colors
 from mpl_toolkits.mplot3d import Axes3D
 
-# Yellow
-YELLOW_LOW  = np.array([ 18, 120, 80])
+# HSV colour ranges  (OpenCV scale: H 0-179, S 0-255, V 0-255)
+YELLOW_LOW  = np.array([ 18, 120,  80])
 YELLOW_HIGH = np.array([ 35, 255, 255])
 
-# Blue
-BLUE_LOW    = np.array([ 95, 120, 50])
+BLUE_LOW    = np.array([ 95, 120,  50])
 BLUE_HIGH   = np.array([135, 255, 255])
 
-# The orange cone is ignored for the first version of the algorithm presented here
-# Orange
-ORANGE_LOW  = np.array([  5, 150, 80])
-ORANGE_HIGH = np.array([ 18, 255, 255])
+# Orange wraps around H=0 in OpenCV → two sub-ranges merged later
+ORANGE_LOW_A  = np.array([  0, 150,  80])
+ORANGE_HIGH_A = np.array([  8, 255, 255])
+ORANGE_LOW_B  = np.array([170, 150,  80])
+ORANGE_HIGH_B = np.array([179, 255, 255])
+
+# Minimum solidity per colour (blue/yellow have stripes that fragment the blob)
+SOLIDITY_MIN = {
+    "yellow": 0.55,
+    "blue":   0.50,
+    "orange": 0.75,
+}
 
 PATH_TO_IMAGES = '../../assets/images/'
 
-# The HSV filters/masks must account for both colors present in the target cone:
-# YELLOW: yellow and black; BLUE: blue and white
-def apply_color_mask(img, hsv, lower, upper):
-    
-    # Create mask
-    mask = cv2.inRange(hsv, lower, upper)
-
-    # Filter the blue region
-    result = cv2.bitwise_and(img, img, mask=mask)
-
-    # Show imgs
-    cv2.imshow('Original img', img)
-    cv2.imshow('Mask', mask)
-    cv2.imshow('Filtered Result', result)
-    
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-    
-    return result
-
-# For white balancing according to
-def percentile_stretch(img_bgr, percentile=95):
-    img = img_bgr.astype(np.float32)
-    for i in range(3):
-        p = np.percentile(img[:,:,i], percentile)
-        if p > 0:
-            img[:,:,i] = img[:,:,i] * (255.0 / p)
-    return np.clip(img, 0, 255).astype(np.uint8)
-
-# For reducing noise - undesired bits extracted from applying the mask
-def clean_mask(mask):
-    # Kernel elíptico respeita melhor formas arredondadas
-    # TODO: Calibrate the morphing parameters
-    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-
-    # 1. Opening: remove small noise (isolated points)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k3)
-
-    # 2. Closure: closes small holes in the cone
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k5)
-
-    # Dilates to get a more realistic color form
-    mask = cv2.dilate(mask, k3, iterations=1)
-
-    return mask
-
-def find_cone_contours(mask):
-    # convert the image to grayscale format
-    img_gray = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-    # apply binary thresholding
-    ret, thresh = cv2.threshold(img_gray, 150, 255, cv2.THRESH_BINARY)
-    # visualize the binary image
-    cv2.imshow('Binary image', thresh)
-    cv2.waitKey(0)
-    cv2.imwrite('image_thres1.jpg', thresh)
-    cv2.destroyAllWindows()
-    
-    # detect the contours on the binary image using cv2.CHAIN_APPROX_NONE
-    contours, hierarchy = cv2.findContours(image=thresh, mode=cv2.RETR_TREE, method=cv2.CHAIN_APPROX_NONE)
-                                        
-    # draw contours on the original image
-    image_copy = mask.copy()
-    cv2.drawContours(image=image_copy, contours=contours, contourIdx=-1, color=(0, 255, 0), thickness=2, lineType=cv2.LINE_AA)
-                    
-    # see the results
-    cv2.imshow('None approximation', image_copy)
-    cv2.waitKey(0)
-    cv2.imwrite('contours_none_image1.jpg', image_copy)
-    cv2.destroyAllWindows()
-
-# def find_cone_contours(mask):
-#     contours, _ = cv2.findContours(
-#         mask,
-#         # For external contours:
-#         cv2.RETR_EXTERNAL,
-#         cv2.CHAIN_APPROX_SIMPLE
-#     )
-#     return contours
-    
-# # For recognizing the cone geometry
-# # TODO: Develop the algorithm and apply the contour filters using cv2 -> a source was not searched yet.
-def filter_contours(contours, img_height):
-    pass
-    
-
-# https://www.geeksforgeeks.org/python/clahe-histogram-eqalization-opencv/
-# For adjusting only brightness in the context of using HSV
-# Observe that only the Value V receives CLAHE processing
-def apply_clahe_contrast(hsv, clipLimit=2.0, tileGridSize=(8,8)):
-    # image_bw = cv2.cvtColor(hsv, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit, tileGridSize)
-    hsv[:, :, 2] = np.clip(clahe.apply(hsv[:, :, 2]) + 30, 0, 255).astype(np.uint8)
-    # _, threshold_img = cv2.threshold(hsv, 155, 255, cv2.THRESH_BINARY)
-    # display_image("Ordinary Threshold", threshold_img)
-    display_image("CLAHE Image", hsv)
-    
-    return hsv
-
-# Displays the image
-def display_image(title, image):
+# Utilities
+def display_image(title: str, image: cv2.typing.MatLike) -> None:
+    """Show an image and wait for a key press."""
     cv2.imshow(title, image)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-# For plotting HSV in a cartesian space
-def plot(img_rgb, hsv):
-    pixel_colors = img_rgb.reshape((np.shape(img_rgb)[0]*np.shape(img_rgb)[1], 3))
-    print(pixel_colors)
-    print(pixel_colors.shape)
-    print()
 
-    norm = colors.Normalize(vmin=-1.,vmax=1.)
+def plot_hsv(img_rgb: cv2.typing.MatLike, hsv: cv2.typing.MatLike) -> None:
+    # Scatter-plot every pixel in the HSV space, coloured by its RGB value
+    pixel_colors = img_rgb.reshape((-1, 3))
+    norm = colors.Normalize(vmin=-1., vmax=1.)
     norm.autoscale(pixel_colors)
     pixel_colors = norm(pixel_colors).tolist()
 
     h, s, v = cv2.split(hsv)
-    hf, sf, vf = h.flatten(), s.flatten(), v.flatten()
-    print(hf)
-
     fig = plt.figure()
-    axis = fig.add_subplot(1, 1, 1, projection="3d")
-    axis.scatter(hf, sf, vf, facecolors=pixel_colors, marker=".")
-
-    axis.set_xlabel("Hue")
-    axis.set_ylabel("Saturation")
-    axis.set_zlabel("Value")
-
+    ax  = fig.add_subplot(1, 1, 1, projection="3d")
+    ax.scatter(h.flatten(), s.flatten(), v.flatten(),
+               facecolors=pixel_colors, marker=".")
+    ax.set_xlabel("Hue")
+    ax.set_ylabel("Saturation")
+    ax.set_zlabel("Value")
     plt.show()
 
-# Apply white balancing, HSV conversion and clahe contrast as preprocessing steps
-def preprocess(img) -> cv2.typing.MatLike:
-    # White Balance WB
-    img = percentile_stretch(img)
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    hsv = apply_clahe_contrast(img)
+# Pre-processing
+def percentile_stretch(img_bgr: cv2.typing.MatLike,
+                        percentile: float = 95) -> cv2.typing.MatLike:
+    
+    # White-balance via per-channel percentile stretch.
+    # Keeps hue stable across different times of day / sky conditions.
+    # Must be applied BEFORE HSV conversion.
+    
+    img = img_bgr.astype(np.float32)
+    for i in range(3):
+        p = np.percentile(img[:, :, i], percentile)
+        if p > 0:
+            img[:, :, i] = img[:, :, i] * (255.0 / p)
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
+def apply_clahe_contrast(hsv: cv2.typing.MatLike,
+                          clip_limit: float = 2.0,
+                          tile_grid: tuple[int, int] = (8, 8)
+                          ) -> cv2.typing.MatLike:
+    
+    # Apply CLAHE only to the V (brightness) channel of an HSV image.
+    # Normalises local contrast without distorting H or S.
+    # FIX: previously received BGR by mistake; now correctly receives HSV.
+    # FIX: preview is converted back to BGR before display.
+    
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid)
+    hsv[:, :, 2] = clahe.apply(hsv[:, :, 2])
+
+    # Convert to BGR only for the visual preview — do not alter the return value
+    preview = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    display_image("CLAHE preview", preview)
+
     return hsv
 
-def main():
-    masks = []
+
+def preprocess(img: cv2.typing.MatLike) -> cv2.typing.MatLike:
     
-    # Read the entirety of the image passed through its path
-    # TODO: generalize the image path to make the modifictions easier
+    # Full pre-processing chain:
+    #   1. White balance (percentile stretch) — operates in BGR
+    #   2. BGR → HSV conversion
+    #   3. CLAHE on V channel — operates in HSV
+    # Returns an HSV image ready for colour segmentation.
+    # FIX: apply_clahe_contrast now receives hsv, not img.
+    
+    img = percentile_stretch(img)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hsv = apply_clahe_contrast(hsv)          # FIX: was apply_clahe_contrast(img)
+    return hsv
+
+# Colour segmentation
+def build_masks(hsv: cv2.typing.MatLike
+                ) -> dict[str, cv2.typing.MatLike]:
+    
+    # Build one binary mask per cone colour.
+    # Orange uses two sub-ranges because its hue wraps around H=0 in OpenCV.
+    # Returns a dict with keys 'yellow', 'blue', 'orange'.
+    
+    mask_yellow = cv2.inRange(hsv, YELLOW_LOW,  YELLOW_HIGH)
+    mask_blue   = cv2.inRange(hsv, BLUE_LOW,    BLUE_HIGH)
+
+    mask_or_a   = cv2.inRange(hsv, ORANGE_LOW_A, ORANGE_HIGH_A)
+    mask_or_b   = cv2.inRange(hsv, ORANGE_LOW_B, ORANGE_HIGH_B)
+    mask_orange = cv2.bitwise_or(mask_or_a, mask_or_b)
+
+    return {
+        "yellow": mask_yellow,
+        "blue":   mask_blue,
+        "orange": mask_orange,
+    }
+
+# Morphological cleaning
+def clean_mask(mask: cv2.typing.MatLike,
+               color: str = "orange") -> cv2.typing.MatLike:
+    
+    # Remove noise and close stripe-induced gaps in the binary mask.
+
+    # Blue and yellow cones have white/black stripes that fragment the blob.
+    # A larger closing kernel (7×7) is used for those colours so the gaps
+    # between colour regions are bridged before contour extraction.
+
+    # Pipeline:
+    #   1. Opening  (3×3) — removes isolated noise pixels
+    #   2. Closing  (5×5 or 7×7) — closes internal holes / stripe gaps
+    #   3. Dilation (3×3, 1 iter) — softly reconnects near-separated regions
+    
+    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    k7 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+
+    # Opening: kill small noise
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k3)
+
+    # Closing: bridge stripe gaps — larger kernel for striped cones
+    k_close = k7 if color in ("yellow", "blue") else k5
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
+
+    # Mild dilation to reconnect nearby fragments
+    mask = cv2.dilate(mask, k3, iterations=1)
+
+    return mask
+
+# Contour extraction
+def find_cone_contours(mask: cv2.typing.MatLike) -> list:
+    
+    # Extract external contours from a binary mask.
+
+    # FIX: removed the erroneous cvtColor(BGR2GRAY) call — the mask is already
+    #      single-channel binary after cv2.inRange + morphological ops.
+    # FIX: removed the unnecessary threshold step for the same reason.
+    # FIX: switched from RETR_TREE to RETR_EXTERNAL so stripe holes are not
+    #      returned as child contours.
+    # FIX: switched from CHAIN_APPROX_NONE to CHAIN_APPROX_SIMPLE to reduce
+    #      the number of points and speed up downstream processing.
+    
+    contours, _ = cv2.findContours(
+        mask,
+        cv2.RETR_EXTERNAL,       # external contours only
+        cv2.CHAIN_APPROX_SIMPLE  # compress redundant points
+    )
+    return list(contours)
+
+# Contour filtering
+def filter_contours(contours: list,
+                    img_height: int,
+                    color: str = "orange") -> list[dict]:
+    
+    # Reject contours that are geometrically incompatible with a cone silhouette.
+
+    # Filters applied in order (cheapest first):
+    #   1. Area bounds      — removes dust and full-frame blobs
+    #   2. Aspect ratio     — cones are taller than wide (w/h < 1.2)
+    #   3. Solidity         — ratio of contour area to convex-hull area;
+    #                         threshold is looser for striped cones (blue/yellow)
+    #   4. Extent           — ratio of contour area to bounding-box area;
+    #                         rejects sparse/thin shapes
+
+    # Returns a list of dicts with geometry features for downstream stages.
+    
+    sol_min = SOLIDITY_MIN.get(color, 0.65)
+    candidates = []
+
+    for cnt in contours:
+
+        # 1. Area
+        area = cv2.contourArea(cnt)
+        if area < 80 or area > 80_000:
+            continue
+
+        # 2. Aspect ratio
+        x, y, w, h = cv2.boundingRect(cnt)
+        if h == 0:
+            continue
+        aspect = w / h
+        if aspect < 0.2 or aspect > 1.2:
+            continue
+
+        # 3. Solidity (via convex hull)
+        hull      = cv2.convexHull(cnt)
+        hull_area = cv2.contourArea(hull)
+        if hull_area == 0:
+            continue
+        solidity = area / hull_area
+        if solidity < sol_min:
+            continue
+
+        # 4. Extent
+        extent = area / (w * h)
+        if extent < 0.30:
+            continue
+
+        candidates.append({
+            "contour":  cnt,
+            "hull":     hull,
+            "bbox":     (x, y, w, h),
+            "area":     area,
+            "solidity": solidity,
+            "aspect":   aspect,
+            "extent":   extent,
+        })
+
+    return candidates
+
+
+# Shape validation (approxPolyDP)
+def validate_cone_shape(candidate: dict) -> bool:
+    # Use the Douglas-Peucker algorithm (cv2.approxPolyDP) to check whether
+    # the convex hull of the candidate approximates a triangular silhouette.
+    
+    # The hull is used instead of the raw contour so that stripe-induced
+    # concavities do not inflate the vertex count.
+    
+    # A cone should simplify to 3–6 vertices at epsilon = 4% of perimeter.
+    # More vertices → jagged / non-cone shape.
+    
+    hull      = candidate["hull"]
+    perimeter = cv2.arcLength(hull, closed=True)
+    if perimeter == 0:
+        return False
+
+    epsilon = 0.04 * perimeter
+    approx  = cv2.approxPolyDP(hull, epsilon, closed=True)
+    n       = len(approx)
+
+    candidate["approx"]    = approx
+    candidate["n_vertices"] = n
+
+    return 3 <= n <= 6
+
+# Stripe verification (uses markings as positive evidence)
+def has_stripe(bbox: tuple[int, int, int, int],
+               hsv_frame: cv2.typing.MatLike,
+               color: str) -> bool:
+
+    # Check whether the ROI contains the characteristic stripe of the cone:
+    #   - Blue cone  → white stripe  (low S, high V)
+    #   - Yellow cone → black stripe (low V)
+    #   - Orange cone → no stripe   (always returns True)
+    
+    # Converts a limitation (fragmented mask) into positive evidence, reducing
+    # false positives from other blue/yellow objects in the scene.
+    
+    if color == "orange":
+        return True
+
+    x, y, w, h = bbox
+    roi = hsv_frame[y:y + h, x:x + w]
+
+    if color == "blue":
+        # White pixels: very low saturation, high brightness
+        stripe_mask = cv2.inRange(roi,
+                                  np.array([  0,   0, 180]),
+                                  np.array([179,  50, 255]))
+    else:  # yellow
+        # Black pixels: very low brightness
+        stripe_mask = cv2.inRange(roi,
+                                  np.array([  0,   0,   0]),
+                                  np.array([179, 255,  60]))
+
+    return int(stripe_mask.sum()) > 100
+
+# Size discrimination (orange only)
+def classify_orange_size(candidate: dict,
+                          small_max_height: int = 60) -> str:
+    
+    # Separate small orange cones from big orange cones using bounding-box
+    # height in pixels.
+
+    # 'small_max_height' is camera- and resolution-dependent and must be
+    # calibrated empirically. A good starting point for 640×480 is 60 px.
+    _, _, _, h = candidate["bbox"]
+    return "orange_small" if h <= small_max_height else "orange_big"
+
+# Visualisation helper
+def draw_detections(img: cv2.typing.MatLike,
+                    results: dict[str, list[dict]]) -> cv2.typing.MatLike:
+     
+    # Draw bounding boxes and labels on a copy of the original image.
+    # Colours match the cone type for quick visual verification.
+    COLOR_BGR = {
+        "yellow":       (  0, 220, 220),
+        "blue":         (220,  80,   0),
+        "orange":       (  0, 140, 255),
+        "orange_small": (  0, 140, 255),
+        "orange_big":   (  0,  60, 200),
+    }
+
+    out = img.copy()
+    for label, candidates in results.items():
+        bgr = COLOR_BGR.get(label, (200, 200, 200))
+        for c in candidates:
+            x, y, w, h = c["bbox"]
+            cv2.rectangle(out, (x, y), (x + w, y + h), bgr, 2)
+            cv2.putText(out, label, (x, y - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, bgr, 1,
+                        cv2.LINE_AA)
+            # Draw approx polygon if available
+            if "approx" in c:
+                cv2.polylines(out, [c["approx"]], True, bgr, 1, cv2.LINE_AA)
+
+    return out
+
+# Main pipeline
+def detect_cones(img: cv2.typing.MatLike,
+                 hsv: cv2.typing.MatLike) -> dict[str, list[dict]]:
+    
+    # Full detection pipeline for a single frame.
+    # Returns a dict with one list of candidate dicts per cone class.
+    
+    masks = build_masks(hsv)
+
+    results: dict[str, list[dict]] = {
+        "yellow":       [],
+        "blue":         [],
+        "orange_small": [],
+        "orange_big":   [],
+    }
+
+    for color, mask in masks.items():
+
+        # 1. Morphological cleaning
+        clean = clean_mask(mask, color)
+
+        # 2. Contour extraction
+        contours = find_cone_contours(clean)
+
+        # 3. Geometric filtering
+        candidates = filter_contours(contours, hsv.shape[0], color)
+
+        # 4. Shape validation + stripe check
+        valid = []
+        for c in candidates:
+            if not validate_cone_shape(c):
+                continue
+            if not has_stripe(c["bbox"], hsv, color):
+                continue
+            valid.append(c)
+
+        # 5. Size discrimination (orange only) / direct assignment
+        if False:
+        # if color == "orange":
+            for c in valid:
+                size_label = classify_orange_size(c)
+                results[size_label].append(c)
+        else:
+            results[color] = valid
+
+    return results
+
+
+def main() -> None:
+    # Load image
     img = cv2.imread(PATH_TO_IMAGES + '000004.png')
+    if img is None:
+        raise FileNotFoundError(f"Image not found at {PATH_TO_IMAGES}000004.png")
 
-    # Shows the original image
-    cv2.imshow("ORIGINAL IMAGE:", img)
+    display_image("Original image", img)
 
-    # Print width, length and channels (the latter for each pixel)
+    # Pre-processing
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    print(img_rgb)
+    hsv     = preprocess(img)
 
-    # Convert BGR to HSV
-    # hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    hsv = preprocess(img)
+    # Optional: HSV scatter plot (slow for large images)
+    # plot_hsv(img_rgb, hsv)
 
-    # Prints a complete plot for viewing relevant information
-    plot(img_rgb, hsv)
-    
-    mask_yellow, mask_blue, mask_orange = cv2.typing.MatLike
+    # Detection
+    results = detect_cones(img, hsv)
 
-    # Loops for color in colors
-    # Currently: [YELLOW, BLUE]
-    colors = [0, 1]
-    for color in colors:
-        if color == 0:
-            lower = BLUE_LOW
-            upper = BLUE_HIGH
-        elif color == 1:
-            lower = YELLOW_LOW
-            upper = YELLOW_HIGH
-        elif color == 2:
-            lower = ORANGE_LOW
-            upper = ORANGE_HIGH
-        # Calls function to apply mask color according to the color
-        mask = apply_color_mask(img, hsv, lower, upper)
-        masks.append(mask)
-        
-    # dict pointing to the contourned imgs
-    results = {
-            "yellow": [],
-            "blue": [],
-            "orange": []
-        }
+    # Summary
+    for label, candidates in results.items():
+        print(f"[{label}] {len(candidates)} cone(s) detected")
 
-    for color, mask in [("blue",   masks[0]),
-                        ("yellow", masks[1])
-                        ]:
+    # Visualisation
+    annotated = draw_detections(img, results)
+    display_image("Detections", annotated)
 
-        # Limpeza morfológica
-        clean = clean_mask(mask)
+    print("Done.")
 
-        # Extração e filtragem de contornos
-        contours  = find_cone_contours(clean)
-        candidates = filter_contours(contours, hsv.shape[0])
-
-        results[color] = candidates
-    
-
-    print("Exiting...")  # Confirm exit
 
 if __name__ == "__main__":
     main()
