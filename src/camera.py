@@ -34,6 +34,7 @@ class StereoCameraLive:
             pipeline.getDefaultDevice()
         )  # TODO: Change this to get a specific device?
         self._stereo: dai.node.StereoDepth = pipeline.create(dai.node.StereoDepth)
+        self._stereo.setRectification(True)
 
         self._left_camera: dai.node.Camera = pipeline.create(dai.node.Camera).build(
             dai.CameraBoardSocket.CAM_B
@@ -66,10 +67,10 @@ class StereoCameraLive:
     def stereo(self) -> dai.node.StereoDepth:
         return self._stereo
 
-    def next_rectified_pair(self) -> tuple[dai.ImgFrame, dai.ImgFrame]:
+    def next_rectified_pair(self) -> tuple[npt.NDArray, npt.NDArray]:
         left_rectified_image = cast(dai.ImgFrame, self._left_rectified_output.get())
         right_rectified_image = cast(dai.ImgFrame, self._right_rectified_output.get())
-        return left_rectified_image, right_rectified_image
+        return left_rectified_image.getCvFrame(), right_rectified_image.getCvFrame()
 
     def save_info_to_yaml(
         self, left_camera_info_filepath: Path, right_camera_info_filepath: Path
