@@ -229,10 +229,10 @@ def clean_mask(mask: cv2.typing.MatLike,
     
     k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 10))
     k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (10, 10))
-    k7 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (6, 6))
+    k7 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
 
     # Opening: kill small noise
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k3)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k7)
 
     # Closing: bridge stripe gaps — larger kernel for striped cones
     # k_close = k7 if color in ("yellow", "blue") else k5
@@ -240,7 +240,7 @@ def clean_mask(mask: cv2.typing.MatLike,
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
 
     # Mild dilation to reconnect nearby fragments
-    mask = cv2.dilate(mask, k3, iterations=1)
+    mask = cv2.dilate(mask, k5, iterations=1)
     
     display_image("mascara", mask)
 
@@ -291,47 +291,38 @@ def filter_contours_geometry(contours: list, img_height: int, color: str) -> lis
     # Returns a list of dicts with geometry features for downstream stages.
     
     sol_min = SOLIDITY_MIN.get(color, 0.65)
+    shape = ""
     candidates = []
 
-    for cnt in contours:
-
-        # # 1. Area
-        # area = cv2.contourArea(cnt)
-        # if area < 80 or area > 80_000:
-        #     continue
-
-        # # 2. Aspect ratio
-        # x, y, w, h = cv2.boundingRect(cnt)
-        # if h == 0:
-            # continue
-        # aspect = w / h
-        # if aspect < 0.2 or aspect > 1.2:
-        #     continue
-
-        # # 3. Solidity (via convex hull)
-        # hull = cv2.convexHull(cnt)
-        # hull_area = cv2.contourArea(hull)
-        # if hull_area == 0:
-        #     continue
-        # solidity = area / hull_area
-        # if solidity < sol_min:
-        #     continue
-
-        # # 4. Extent
-        # extent = area / (w * h)
-        # if extent < 0.30:
-        #     continue
-
-        # candidates.append({
-        #     "contour":  cnt,
-        #     "hull":     hull,
-        #     "bbox":     (x, y, w, h),
-        #     "area":     area,
-        #     "solidity": solidity,
-        #     "aspect":   aspect,
-        #     "extent":   extent,
-        # })
-        a = 0
+    for i, cnt in enumerate(contours):
+        if i == 0:
+            continue
+        epsilon = 0.01*cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
+        # Study the approxPolyN method for getting vertices-oriented polygons approx
+        approx_test = cv2.approxPolyN(cnt, 4)
+        
+        x, y, w, h = cv2.boundingRect(approx_test)
+        x_mid = int(x + w/3)
+        y_mid = int(y+h/1.5)
+        
+        coords = (x_mid, y_mid)
+        colour = (0, 0, 0)
+        font = cv2.FONT_HERSHEY_DUPLEX
+        
+        if len(approx) == 3:
+            shape = "triangle"
+        elif len(approx) == 4:
+            shape = "quad"
+        else:
+            shape = None
+        
+        
+    
+        candidates.append({
+            "contour": cnt,
+            "bbox": (x, y, w, h)
+        })
 
     return candidates
 
@@ -466,8 +457,8 @@ def detect_cones(img: cv2.typing.MatLike,
         # 4. Shape validation + stripe check
         valid = []
         for c in candidates:
-            if not validate_cone_shape(c):
-                continue
+            # if not validate_cone_shape(c):
+            #     continue
             # if not has_stripe(c["bbox"], hsv, color):
             #     continue
             valid.append(c)
@@ -486,9 +477,10 @@ def detect_cones(img: cv2.typing.MatLike,
 
 def main() -> None:
     # Load image
-    img = cv2.imread(PATH_TO_IMAGES + 'cone.jpg')
+    image_path = 'oak_left_image_raw.png'
+    img = cv2.imread(PATH_TO_IMAGES + image_path)
     if img is None:
-        raise FileNotFoundError(f"Image not found at {PATH_TO_IMAGES}cone.jpg")
+        raise FileNotFoundError(f"Image not found at {PATH_TO_IMAGES}{image_path}")
 
     display_image("Original image", img)
     save_image("original_image", img)
@@ -496,6 +488,8 @@ def main() -> None:
     # Pre-processing
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     hsv = preprocess(img)
+    
+    plot_hsv(img_rgb, hsv)
 
     # Detection
     results = detect_cones(img, hsv)
