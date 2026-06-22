@@ -1,6 +1,6 @@
 """Command Line Interface for the green program"""
 
-from src.depth.estimator import MODELS
+from src.depth.estimator import NeuralNetworkEstimator
 
 import argparse
 from .app import App
@@ -13,8 +13,9 @@ class CommandLineInterface:
             description="A tool for live testing and comparing yellow and blue clone detection and depth estimation.",
         )
         self._parser.add_argument(
+            "-dp",
             "--disparity_algorithm",
-            choices=MODELS,
+            choices=NeuralNetworkEstimator.MODELS,
         )
         self._parser.add_argument("--cone_detector")
         self._parser.add_argument("--recorded", action="store_true")
