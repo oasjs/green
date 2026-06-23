@@ -1,6 +1,6 @@
 """Command Line Interface for the green program"""
 
-from src.depth.estimator import NeuralNetworkEstimator
+from src.depth.estimator import DepthEstimator
 
 import argparse
 from .app import App
@@ -15,9 +15,9 @@ class CommandLineInterface:
         self._parser.add_argument(
             "-dp",
             "--disparity_algorithm",
-            choices=NeuralNetworkEstimator.MODELS,
+            choices=DepthEstimator.NN_MODELS + DepthEstimator.CLASSICAL_ALGORITHMS,
         )
-        self._parser.add_argument("--cone_detector")
+        self._parser.add_argument("-c", "--cone_detector")
         self._parser.add_argument("--recorded", action="store_true")
 
         self._start(app)

@@ -36,13 +36,15 @@ class App:
     def run_live(
         self,
         disparity_algorithm: str,
-        image_width: int = 640,
-        image_height: int = 400,
+        image_width: int = 1280,
+        image_height: int = 800,
         fps: int = 30,
     ):
         pipeline = dai.Pipeline()
-        camera = StereoCameraLive(pipeline, image_width, image_height, fps)
-        depth_estimator = DepthEstimator.factory(disparity_algorithm)
+        camera = StereoCameraLive(
+            pipeline, image_width, image_height, fps, top_crop_ratio=0.4
+        )
+        depth_estimator = DepthEstimator.factory(disparity_algorithm, camera)
         visualizer = self.DepthMapVisualizer()
 
         with pipeline:

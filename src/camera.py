@@ -19,6 +19,7 @@ class StereoCameraLive:
         image_width: int,
         image_height: int,
         fps: int,
+        top_crop_ratio: float = 0.0,
         image_type: dai.ImgFrame.Type = dai.ImgFrame.Type.GRAY8,
         resize_mode: dai.ImgResizeMode = dai.ImgResizeMode.CROP,
     ):
@@ -33,31 +34,75 @@ class StereoCameraLive:
         self._device = (
             pipeline.getDefaultDevice()
         )  # TODO: Change this to get a specific device?
+
         self._stereo: dai.node.StereoDepth = pipeline.create(dai.node.StereoDepth)
         self._stereo.setRectification(True)
+        self._stereo.setExtendedDisparity(True)  # Shorter min depth, double disp range
+        self._stereo.setSubpixel(True)
 
-        self._left_camera: dai.node.Camera = pipeline.create(dai.node.Camera).build(
+        left_camera: dai.node.Camera = pipeline.create(dai.node.Camera).build(
             dai.CameraBoardSocket.CAM_B
         )
-        self._right_camera: dai.node.Camera = pipeline.create(dai.node.Camera).build(
+        right_camera: dai.node.Camera = pipeline.create(dai.node.Camera).build(
             dai.CameraBoardSocket.CAM_C
         )
 
-        self._left_camera.requestOutput(
+        left_camera.requestOutput(
             size=(image_width, image_height),
             type=image_type,
             resizeMode=resize_mode,
             fps=fps,
         ).link(self._stereo.left)
-        self._right_camera.requestOutput(
+
+        right_camera.requestOutput(
             size=(image_width, image_height),
             type=image_type,
             resizeMode=resize_mode,
             fps=fps,
         ).link(self._stereo.right)
 
-        self._left_rectified_output = self._stereo.rectifiedLeft.createOutputQueue()
-        self._right_rectified_output = self._stereo.rectifiedRight.createOutputQueue()
+        if top_crop_ratio > 0.0:
+            print("HEERE")
+            self._left_rectified_output = self._attach_crop_manip(
+                pipeline,
+                self._stereo.rectifiedLeft,
+                image_width,
+                image_height,
+                top_crop_ratio,
+            )
+            self._right_rectified_output = self._attach_crop_manip(
+                pipeline,
+                self._stereo.rectifiedRight,
+                image_width,
+                image_height,
+                top_crop_ratio,
+            )
+        else:
+            self._left_rectified_output = self._stereo.rectifiedLeft.createOutputQueue()
+            self._right_rectified_output = (
+                self._stereo.rectifiedRight.createOutputQueue()
+            )
+
+    def _attach_crop_manip(
+        self,
+        pipeline: dai.Pipeline,
+        source: dai.Node.Output,
+        width: int,
+        height: int,
+        top_crop_ratio: float,
+    ) -> dai.MessageQueue:
+        crop_y = int(height * top_crop_ratio)
+        cropped_height = height - int(height * top_crop_ratio)
+
+        manip = pipeline.create(dai.node.ImageManip)
+        manip.setBackend(
+            dai.node.ImageManip.Backend.GPU
+            if self._device.hasGPU()
+            else dai.node.ImageManip.Backend.CPU
+        )
+        manip.initialConfig.addCrop(x=0, y=crop_y, w=width, h=cropped_height)
+        source.link(manip.inputImage)
+        return manip.out.createOutputQueue()
 
     @property
     def device(self) -> dai.Device:
