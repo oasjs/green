@@ -24,12 +24,12 @@ class CommandLineInterface:
 
     def _start(self, app: App):
         args = self._parser.parse_args()
-        if args.recorded:
-            app.run_recorded()
-        else:
-            if args.disparity_algorithm is None and args.cone_detector is None:
-                self._parser.error(
-                    "At least one of --disparity_algorithm or --cone_detector is required"
-                )
+        if args.disparity_algorithm is None and args.cone_detector is None:
+            self._parser.error(
+                "At least one of --disparity_algorithm or --cone_detector is required"
+            )
 
-            app.run_live(args.disparity_algorithm)
+        if args.recorded:
+            app.run_recorded(args.disparity_algorithm)
+        else:
+            app.run_live(args.disparity_algorithm, 640, 400)

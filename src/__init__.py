@@ -1,1 +1,1 @@
-from .camera import StereoCameraLive, StereoCameraRecorded
+from .camera import StereoCameraLive
