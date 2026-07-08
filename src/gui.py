@@ -1,6 +1,7 @@
 """Stereo depth estimation demo: upload OR live camera, BM / SGBM / RAFT-Stereo."""
 
 import csv
+import logging
 import os
 import time
 
@@ -11,6 +12,7 @@ import gradio as gr
 import depthai as dai
 
 import metrics
+import detectors
 from estimators import (
     colorize,
     BMEstimator,
@@ -24,9 +26,19 @@ from estimators import (
 )
 from camera_source import LiveStereoSource
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+# Bump detectors to DEBUG for the most verbose per-box diagnostics; leave at
+# INFO for just model-load / box-count / final-tally messages.
+logging.getLogger("detectors").setLevel(logging.INFO)
+
+logger = logging.getLogger(__name__)
+
 
 class DepthEstimationApp:
-    """Builds and serves the Gradio UI, one tab per estimator."""
+    """Builds and serves the Gradio UI, one tab per estimator/detector."""
 
     MONO_ESTIMATOR_NAME = "Depth Anything V2 (mono)"
 
@@ -49,6 +61,15 @@ class DepthEstimationApp:
             self._estimators["DepthAI-SGBM"] = DepthAiSgbmEstimator(camera_source.camera)
         self._process = psutil.Process(os.getpid())
         self._history: dict[str, list[dict]] = {name: [] for name in self._estimators}
+
+        # Cone detectors (Formula SAE blue/yellow cones), run on the center RGB
+        # camera. Kept in a separate dict from the depth estimators since they
+        # take one image, not a stereo pair, and don't have quality metrics.
+        self._detectors = {
+            "Classical CV (HSV + contours)": detectors.ClassicalCVConeDetector(),
+            "HOG + SVM": detectors.HogSvmConeDetector(),
+            "YOLOv26": detectors.YoloConeDetector(),
+        }
 
         # Scale-alignment state for the monocular estimator: relative depth models
         # only recover depth up to an unknown affine transform (depth = a*raw + b).
@@ -99,7 +120,7 @@ class DepthEstimationApp:
         right_path = os.path.join(out_dir, f"right_{ts}.png")
         cv2.imwrite(left_path, cv2.cvtColor(np.asarray(left), cv2.COLOR_RGB2BGR))
         cv2.imwrite(right_path, cv2.cvtColor(np.asarray(right), cv2.COLOR_RGB2BGR))
-        return [left_path, right_path]
+        return gr.File(value=[left_path, right_path], visible=True)
 
     def _run(self, estimator_name, left, right, param_values, param_keys):
         estimator = self._estimators[estimator_name]
@@ -164,11 +185,56 @@ class DepthEstimationApp:
             calibration_text or "",
         )
 
+    def _run_detection(self, detector_name, image, param_values, param_keys):
+        detector = self._detectors[detector_name]
+        if not getattr(detector, "available", True):
+            raise gr.Error(f"{detector.name} is not implemented yet.")
+        if image is None:
+            raise gr.Error("Provide the center camera image (upload or capture live).")
+
+        params = dict(zip(param_keys, param_values))
+
+        start = time.perf_counter()
+        annotated, found = detector.compute(np.asarray(image), params)
+        elapsed = time.perf_counter() - start
+
+        fps = 1.0 / elapsed if elapsed > 0 else 0.0
+        mem_mb = self._process.memory_info().rss / (1024 * 1024)
+
+        return (
+            annotated,
+            f"{fps:.2f} FPS ({elapsed * 1000:.0f} ms)",
+            f"{mem_mb:.0f} MB",
+            detectors.summarize(found),
+        )
+
+    def _load_yolo_weights_from_url(self, detector_name, url):
+        """Point a YOLO-style detector at a new weights URL, clearing its
+        cached model so the next run downloads/loads the new one."""
+        detector = self._detectors[detector_name]
+        if not url or not url.strip():
+            raise gr.Error("Enter a URL to a .pt weights file first.")
+        if not hasattr(detector, "set_weights_url"):
+            raise gr.Error(f"{detector.name} doesn't support loading weights from a URL.")
+        detector.set_weights_url(url.strip())
+        return f"Will load on next run — {detector.current_weights_label()}"
+
+    def _load_yolo_weights_from_file(self, detector_name, file_path):
+        """Point a YOLO-style detector at a locally-uploaded/picked weights
+        file, clearing its cached model so the next run loads the new one."""
+        detector = self._detectors[detector_name]
+        if not file_path:
+            raise gr.Error("Choose a .pt or .onnx weights file first.")
+        if not hasattr(detector, "set_weights_path"):
+            raise gr.Error(f"{detector.name} doesn't support loading weights from a local file.")
+        detector.set_weights_path(file_path)
+        return f"Will load on next run — {detector.current_weights_label()}"
+
     def _calibrate_mono(self):
         if self._last_mono_raw is None:
             raise gr.Error("Run the Depth Anything V2 tab at least once first.")
         if self._last_stereo_raw is None:
-            raise gr.Error("Run a stereo tab (BM/SGBM/RAFT/DepthAI) at least once first.")
+            raise gr.Error("Run a stereo tab (BM/SGBM/RAFT/DepthEverythingV2/DepthAI) at least once first.")
 
         mono_raw = self._last_mono_raw
         stereo_raw = self._last_stereo_raw
@@ -238,7 +304,7 @@ class DepthEstimationApp:
             writer.writeheader()
             writer.writerows(records)
 
-        return path
+        return gr.File(value=path, visible=True)
 
     def _reset_metrics(self, estimator_name: str):
         self._history[estimator_name] = []
@@ -255,8 +321,10 @@ class DepthEstimationApp:
         extra_widgets_fn=None,
         live_widgets=None,
     ):
+        """Returns (tab, timer). `timer` is None if there's no live camera source."""
         estimator = self._estimators[estimator_name]
         is_mono = estimator_name == self.MONO_ESTIMATOR_NAME
+        timer = None
 
         with gr.Tab(estimator.name) as tab:
             with gr.Row():
@@ -299,7 +367,7 @@ class DepthEstimationApp:
                     with gr.Row():
                         export_btn = gr.Button("Export metrics to CSV")
                         reset_btn = gr.Button("Reset history")
-                    metrics_file = gr.File(label="Metrics CSV", visible=True, height=100)
+                    metrics_file = gr.File(label="Metrics CSV", visible=False, height=100)
 
                     export_btn.click(
                         lambda _name=estimator_name: self._export_metrics(_name),
@@ -340,13 +408,13 @@ class DepthEstimationApp:
                                 *run_outputs,
                             ],
                             concurrency_limit=1,
+                            show_progress="hidden",
+                            scroll_to_output=False,
                         )
 
-                        live_toggle.change(
-                            lambda active: gr.Timer(active=active),
-                            inputs=live_toggle,
-                            outputs=timer,
-                        )
+                        # NOTE: toggle.change / interval.change are wired centrally in
+                        # build() now, so only one live timer can ever be active across
+                        # all tabs at once, and switching tabs stops it.
                         interval.change(
                             lambda secs: gr.Timer(value=secs),
                             inputs=interval,
@@ -361,25 +429,144 @@ class DepthEstimationApp:
                 _on_run,
                 inputs=[left_gray, right_gray, *widgets.values()],
                 outputs=run_outputs,
+                show_progress="hidden",  # was "minimal" — caused the page to snap/scroll
+                scroll_to_output=False,
             )
 
-        return tab
+        return tab, timer
+
+    def _build_detection_tab(self, detector_name: str, center_img, live_widgets=None):
+        """Returns (tab, timer). `timer` is None if there's no live camera source.
+
+        Follows the same layout as _build_tab: params/run button on the left,
+        a dedicated output image on the right. Detection boxes are drawn onto
+        that dedicated output image, never onto the shared `center_img` input
+        preview — so nothing else can race with or overwrite them.
+        """
+        detector = self._detectors[detector_name]
+        timer = None
+        supports_weights_url = hasattr(detector, "set_weights_url")
+        supports_weights_path = hasattr(detector, "set_weights_path")
+
+        with gr.Tab(detector.name) as tab:
+            if not getattr(detector, "available", True):
+                gr.Markdown(f"⚠️ {detector.name} is not implemented yet.")
+
+            if supports_weights_url or supports_weights_path:
+                weights_status_box = gr.Textbox(
+                    label="Weights status",
+                    interactive=False,
+                    value=f"Current: {detector.current_weights_label()}",
+                )
+
+            if supports_weights_url:
+                with gr.Row():
+                    weights_url_box = gr.Textbox(
+                        label="Model weights URL (.pt or .onnx)",
+                        placeholder=(
+                            "https://huggingface.co/<repo>/resolve/main/<file>.pt"
+                            "?download=true  (.onnx also supported)"
+                        ),
+                        value="",
+                        scale=4,
+                    )
+                    load_url_btn = gr.Button("Load from URL", scale=1)
+                load_url_btn.click(
+                    lambda url, _name=detector_name: self._load_yolo_weights_from_url(_name, url),
+                    inputs=weights_url_box,
+                    outputs=weights_status_box,
+                )
+
+            if supports_weights_path:
+                with gr.Row():
+                    weights_file_picker = gr.File(
+                        label="Or pick a local weights file (.pt / .onnx)",
+                        file_types=[".pt", ".onnx"],
+                        scale=4,
+                    )
+                    load_file_btn = gr.Button("Load from file", scale=1)
+                load_file_btn.click(
+                    lambda f, _name=detector_name: self._load_yolo_weights_from_file(
+                        _name, f.name if f is not None else None
+                    ),
+                    inputs=weights_file_picker,
+                    outputs=weights_status_box,
+                )
+
+            with gr.Row():
+                with gr.Column():
+                    widgets = self._build_param_widgets(detector)
+                    run_btn = gr.Button(f"Run {detector.name}", variant="primary")
+
+                with gr.Column():
+                    out_img = gr.Image(label="Detections (bounding boxes)", height=400)
+                    fps_box = gr.Textbox(label="Compute speed", interactive=False)
+                    mem_box = gr.Textbox(label="Memory usage", interactive=False)
+                    counts_box = gr.Textbox(
+                        label="Detections", interactive=False, lines=3
+                    )
+
+            param_keys = list(widgets.keys())
+            run_outputs = [out_img, fps_box, mem_box, counts_box]
+
+            # Only allow live mode if the detector is actually implemented —
+            # otherwise a running timer would spam gr.Error every tick.
+            detector_available = getattr(detector, "available", True)
+
+            if self._camera_source is not None and live_widgets is not None:
+                live_toggle, interval = live_widgets
+                timer = gr.Timer(1.0, active=False)
+
+                if not detector_available:
+                    live_toggle.interactive = False
+
+                def _live_tick(*vals, _name=detector_name, _keys=param_keys):
+                    _, _, _, _, center = self._capture_live()
+                    result = self._run_detection(_name, center, vals, _keys)
+                    return [*result, center]
+
+                timer.tick(
+                    _live_tick,
+                    inputs=list(widgets.values()),
+                    outputs=[*run_outputs, center_img],
+                    concurrency_limit=1,
+                    show_progress="hidden",
+                    scroll_to_output=False,
+                )
+                # NOTE: toggle.change wired centrally in build().
+                interval.change(
+                    lambda secs: gr.Timer(value=secs), inputs=interval, outputs=timer
+                )
+
+            def _on_run(img, *vals, _name=detector_name, _keys=param_keys):
+                return self._run_detection(_name, img, vals, _keys)
+
+            run_btn.click(
+                _on_run,
+                inputs=[center_img, *widgets.values()],
+                outputs=run_outputs,
+                show_progress="hidden",  # was "minimal" — caused the page to snap/scroll
+                scroll_to_output=False,
+            )
+
+        return tab, timer
 
     def build(self) -> gr.Blocks:
         with gr.Blocks(title="Stereo Depth Estimation Demo") as demo:
             gr.Markdown(
-                "# Stereo Depth Estimation — BM / SGBM / RAFT-Stereo\n"
-                "Upload a rectified stereo pair, or capture one from a live camera, "
-                "then tune each algorithm's parameters."
+                "# Stereo Depth Estimation & Cone Detection\n"
+                "Upload a rectified stereo pair, or capture one from a live camera. "
+                "Depth tabs read the left/right pair; cone-detection tabs read the "
+                "center RGB camera and draw boxes on their own output image."
             )
 
-            # Shared across all tabs: one capture, all estimators run on the same pair.
+            # Shared across all tabs: one capture, all estimators/detectors run on
+            # the same frame(s). center_img is a pure input/preview now — nothing
+            # ever draws on top of it, so it can't be raced or overwritten by boxes.
             with gr.Row():
                 left_img = gr.Image(label="Left image", type="numpy", height=400)
                 right_img = gr.Image(label="Right image", type="numpy", height=400)
-                center_img = gr.Image(
-                    label="Center camera (RGB)", type="numpy", height=400, interactive=False
-                )
+                center_img = gr.Image(label="Center camera (RGB)", type="numpy", height=400)
 
             # Hidden grayscale copies: the estimators always run on these, regardless
             # of whether the displayed image above is a color live-feed preview or a
@@ -390,12 +577,14 @@ class DepthEstimationApp:
             right_img.upload(self._to_gray, inputs=right_img, outputs=right_gray)
 
             estimator_names = list(self._estimators.keys())
+            detector_names = list(self._detectors.keys())
+            all_names = estimator_names + detector_names
             live_widgets_by_name = {}
             if self._camera_source is not None:
                 with gr.Row():
                     live_btn = gr.Button("Capture from camera")
                     save_btn = gr.Button("Save current frame pair")
-                    for i, name in enumerate(estimator_names):
+                    for i, name in enumerate(all_names):
                         toggle = gr.Checkbox(label="Live feed", value=False, visible=(i == 0))
                         interval = gr.Slider(
                             0.1, 5.0, value=1.0, step=0.1,
@@ -403,10 +592,19 @@ class DepthEstimationApp:
                         )
                         live_widgets_by_name[name] = (toggle, interval)
 
-                saved_files = gr.File(label="Download frames", file_count="multiple", height=100)
+                saved_files = gr.File(
+                    label="Download frames", file_count="multiple", height=100, visible=False
+                )
+
+                def _live_capture_click():
+                    gray_left, gray_right, _, _, center = self._capture_live()
+                    return gray_left, gray_right, gray_left, gray_right, center
+
                 live_btn.click(
-                    self._capture_live,
+                    _live_capture_click,
                     outputs=[left_img, right_img, left_gray, right_gray, center_img],
+                    show_progress="minimal",
+                    scroll_to_output=False,
                 )
                 save_btn.click(
                     self._save_frame_pair,
@@ -417,13 +615,19 @@ class DepthEstimationApp:
             def _live_widgets(name):
                 return live_widgets_by_name.get(name)
 
+            timers_by_name = {}
+            tabs = []
+
+            # Single combined tab group: depth-estimation tabs followed by
+            # cone-detection tabs, so everything lives under one gr.Tabs().
             with gr.Tabs():
-                tabs = []
-                tabs.append(self._build_tab(
+                t, timer = self._build_tab(
                     "StereoBM", left_img, right_img, left_gray, right_gray, center_img,
                     live_widgets=_live_widgets("StereoBM"),
-                ))
-                tabs.append(self._build_tab(
+                )
+                tabs.append(t); timers_by_name["StereoBM"] = timer
+
+                t, timer = self._build_tab(
                     "StereoSGBM",
                     left_img,
                     right_img,
@@ -436,7 +640,8 @@ class DepthEstimationApp:
                         )
                     },
                     live_widgets=_live_widgets("StereoSGBM"),
-                ))
+                )
+                tabs.append(t); timers_by_name["StereoSGBM"] = timer
 
                 def _raft_extra_widgets():
                     if not RAFT_AVAILABLE:
@@ -452,11 +657,12 @@ class DepthEstimationApp:
                         ),
                     }
 
-                tabs.append(self._build_tab(
+                t, timer = self._build_tab(
                     "RAFT-Stereo", left_img, right_img, left_gray, right_gray, center_img,
                     extra_widgets_fn=_raft_extra_widgets,
                     live_widgets=_live_widgets("RAFT-Stereo"),
-                ))
+                )
+                tabs.append(t); timers_by_name["RAFT-Stereo"] = timer
 
                 def _mono_extra_widgets():
                     if not MONO_AVAILABLE:
@@ -472,7 +678,7 @@ class DepthEstimationApp:
                         ),
                     }
 
-                tabs.append(self._build_tab(
+                t, timer = self._build_tab(
                     "Depth Anything V2 (mono)",
                     left_img,
                     right_img,
@@ -481,29 +687,69 @@ class DepthEstimationApp:
                     center_img,
                     extra_widgets_fn=_mono_extra_widgets,
                     live_widgets=_live_widgets("Depth Anything V2 (mono)"),
-                ))
+                )
+                tabs.append(t); timers_by_name["Depth Anything V2 (mono)"] = timer
 
                 if "DepthAI-SGBM" in self._estimators:
-                    tabs.append(self._build_tab(
+                    t, timer = self._build_tab(
                         "DepthAI-SGBM", left_img, right_img, left_gray, right_gray, center_img,
                         live_widgets=_live_widgets("DepthAI-SGBM"),
-                    ))
+                    )
+                    tabs.append(t); timers_by_name["DepthAI-SGBM"] = timer
 
-            # Show only the active tab's live-feed controls up top.
+                for name in detector_names:
+                    t, timer = self._build_detection_tab(
+                        name, center_img, live_widgets=_live_widgets(name)
+                    )
+                    tabs.append(t); timers_by_name[name] = timer
+
+            # ---- Central live-feed coordination ----
+            # Only one timer may be active across the whole app at any time, and
+            # switching tabs (or toggling a different tab's live feed on) always
+            # stops every other timer.
             if self._camera_source is not None:
+                all_toggles = [live_widgets_by_name[n][0] for n in all_names]
+                all_timers = [timers_by_name[n] for n in all_names]
                 all_live_components = [w for pair in live_widgets_by_name.values() for w in pair]
-                for name, tab in zip(estimator_names, tabs):
+
+                for name in all_names:
+                    toggle, _ = live_widgets_by_name[name]
+                    this_timer = timers_by_name[name]
+
+                    def _on_toggle(active, _toggle=toggle, _timer=this_timer):
+                        toggle_updates = [
+                            gr.Checkbox(value=(t is _toggle and active)) for t in all_toggles
+                        ]
+                        timer_updates = [
+                            gr.Timer(active=(tm is _timer and active)) for tm in all_timers
+                        ]
+                        return [*toggle_updates, *timer_updates]
+
+                    toggle.change(
+                        _on_toggle,
+                        inputs=toggle,
+                        outputs=[*all_toggles, *all_timers],
+                    )
+
+                for name, tab in zip(all_names, tabs):
                     toggle, interval = live_widgets_by_name[name]
 
                     def _select_visibility(_toggle=toggle, _interval=interval):
-                        updates = []
+                        vis_updates = []
                         for t, iv in live_widgets_by_name.values():
-                            is_active = t is _toggle
-                            updates.append(gr.Checkbox(visible=is_active))
-                            updates.append(gr.Slider(visible=is_active))
-                        return updates
+                            is_active_tab = t is _toggle
+                            vis_updates.append(gr.Checkbox(visible=is_active_tab))
+                            vis_updates.append(gr.Slider(visible=is_active_tab))
+                        # Switching tabs always stops every live feed, so a
+                        # background tab can't keep writing over shared widgets.
+                        toggle_updates = [gr.Checkbox(value=False) for _ in all_toggles]
+                        timer_updates = [gr.Timer(active=False) for _ in all_timers]
+                        return [*vis_updates, *toggle_updates, *timer_updates]
 
-                    tab.select(_select_visibility, outputs=all_live_components)
+                    tab.select(
+                        _select_visibility,
+                        outputs=[*all_live_components, *all_toggles, *all_timers],
+                    )
         return demo
 
     def launch(self, **kwargs):
